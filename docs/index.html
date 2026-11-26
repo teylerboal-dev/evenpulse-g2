@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no" />
+    <title>EvenPulse — Multi-Exchange HUD for Even G2</title>
+    <style>
+      :root {
+        --bg: #12151c;
+        --card: #1a1f2b;
+        --border: #2a3142;
+        --text: #e8ecf4;
+        --muted: #8b95a8;
+        --g2-bg: #07130b;
+        --g2-green: #2dff7a;
+        --g2-dim: #15803d;
+        --accent: #38bdf8;
+        --danger: #f87171;
+        --ok: #34d399;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        touch-action: manipulation;
+        -webkit-text-size-adjust: 100%;
+        overscroll-behavior: none;
+      }
+      .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 18px 16px 32px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0;
+        letter-spacing: -0.01em;
+      }
+      .subtitle {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .pills {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .pill {
+        font-size: 11px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--muted);
+      }
+      .pill.ok { color: var(--ok); border-color: rgba(52, 211, 153, 0.35); }
+      .pill.err { color: var(--danger); border-color: rgba(248, 113, 113, 0.35); }
+
+      /* Authentic 576x288 G2 Monochrome Green Lens Mirror */
+      .g2-frame {
+        background: #050a07;
+        border: 2px solid #1e3a28;
+        border-radius: 14px;
+        padding: 14px 16px 10px;
+        box-shadow: 0 0 28px rgba(45, 255, 122, 0.08), inset 0 0 24px rgba(45, 255, 122, 0.05);
+        margin-bottom: 14px;
+      }
+      .g2-meta {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: var(--g2-dim);
+        margin-bottom: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .g2-screen {
+        background: var(--g2-bg);
+        border: 1px solid #143620;
+        border-radius: 8px;
+        padding: 12px 14px;
+        min-height: 196px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+      .g2-body {
+        margin: 0;
+        color: var(--g2-green);
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+        text-shadow: 0 0 6px rgba(45, 255, 122, 0.35);
+      }
+      .g2-footer {
+        margin-top: 10px;
+        padding-top: 6px;
+        border-top: 1px dashed #174928;
+        color: #1fc95f;
+        font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+      button {
+        appearance: none;
+        background: var(--card);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 9px 12px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      button:hover { border-color: var(--accent); background: #222938; }
+      button.primary {
+        background: #133b24;
+        border-color: #22c55e;
+        color: #bbf7d0;
+      }
+      button.primary:hover { background: #164e2e; }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-bottom: 12px;
+      }
+      .card h2 {
+        font-size: 14px;
+        margin: 0 0 8px;
+        color: var(--text);
+      }
+      .grid-2 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+      }
+      .stat {
+        background: #141923;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+      }
+      .stat .label { font-size: 11px; color: var(--muted); }
+      .stat .val { font-size: 16px; font-weight: 600; margin-top: 2px; }
+      .pos { color: var(--ok); }
+      .neg { color: var(--danger); }
+      footer.note {
+        font-size: 11px;
+        color: var(--muted);
+        text-align: center;
+        margin-top: 12px;
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-DzXctK8P.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
