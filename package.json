@@ -1,13 +1,14 @@
 {
   "name": "evenpulse-g2",
   "private": true,
-  "version": "1.0.0",
-  "description": "EvenPulse — Live Multi-Exchange Markets, Cross-Exchange Spreads, Session PnL & 1-Tap Paper Alerts HUD for Even Realities G2",
+  "version": "2.0.0",
+  "description": "EvenPulse v2.0 — Live 4-Venue Markets (Binance, OKX, Coinbase, Hyperliquid), 4-Bit Micro-LED Sparklines, Voice PTT & Default-NO Safety-Gated Paper Actions HUD for Even Realities G2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "node --test tests/evenpulse.test.mjs",
     "pack": "npm run build && evenhub pack app.json dist",
     "simulate": "evenhub-simulator http://localhost:5173"
   },

@@ -1,7 +1,8 @@
-// Paper-trading positions, live session PnL, liquidation distance, and 1-tap G2 alerts.
-// Strictly read-only / paper-trading only — holds zero user funds or exchange API keys.
+// Paper-trading positions, live session PnL, liquidation distance, and Default-NO
+// 30-second expiring Safety Gate write actions for Even Realities G2.
+// Strictly read-only public feeds + paper simulation — holds zero user funds or API keys.
 
-import { bestPrice, MarketState, SymbolKey } from './exchanges'
+import { bestPrice, type MarketState, type SymbolKey } from './exchanges'
 
 export type Side = 'LONG' | 'SHORT'
 
@@ -12,7 +13,7 @@ export interface PaperPosition {
   qty: number
   entryPrice: number
   leverage: number
-  venue: 'Binance' | 'Coinbase' | 'Hyperliquid'
+  venue: 'Binance' | 'OKX' | 'Coinbase' | 'Hyperliquid'
   closedAt?: number
   realizedPnl?: number
 }
@@ -27,20 +28,38 @@ export interface PriceAlert {
   acknowledged: boolean
 }
 
+export type SafetyActionKind = 'CLOSE_100' | 'REDUCE_50' | 'OPEN_PAPER' | 'ACK_ALERT' | 'ADD_ALERT'
+
+export interface SafetyBanner {
+  id: string
+  kind: SafetyActionKind
+  title: string
+  detail: string
+  selectedOption: 'NO' | 'YES' // Always defaults to NO to prevent accidental temple taps
+  createdAt: number
+  expiresAt: number
+  positionId?: string
+  alertId?: string
+  draftOrder?: { symbol: SymbolKey; side: Side; qty: number; leverage: number }
+  draftAlert?: Omit<PriceAlert, 'id' | 'triggered' | 'acknowledged'>
+}
+
+export interface AuditEntry {
+  ts: number
+  summary: string
+}
+
 export interface PaperState {
   positions: PaperPosition[]
   realizedSessionPnl: number
   alerts: PriceAlert[]
-  activeBanner: {
-    title: string
-    detail: string
-    actionLabel: string
-    positionId?: string
-    alertId?: string
-  } | null
+  activeBanner: SafetyBanner | null
   seededFromLive: boolean
   lastActionToast: string | null
+  auditLog: AuditEntry[]
 }
+
+export const SAFETY_GATE_TTL_MS = 30_000
 
 export function createInitialPaperState(): PaperState {
   return {
@@ -50,13 +69,10 @@ export function createInitialPaperState(): PaperState {
     activeBanner: null,
     seededFromLive: false,
     lastActionToast: null,
+    auditLog: [],
   }
 }
 
-/**
- * Seeds realistic paper positions anchored slightly off the live market prices
- * on the first live tick so judges immediately see moving PnL & liquidation distances.
- */
 export function seedPaperFromLive(state: PaperState, market: MarketState): PaperState {
   if (state.seededFromLive) return state
   const btc = bestPrice(market.assets.BTC)
@@ -90,7 +106,7 @@ export function seedPaperFromLive(state: PaperState, market: MarketState): Paper
       qty: 20,
       entryPrice: Number((sol * 1.012).toFixed(2)),
       leverage: 3,
-      venue: 'Coinbase',
+      venue: 'OKX',
     },
   ]
 
@@ -118,7 +134,7 @@ export function seedPaperFromLive(state: PaperState, market: MarketState): Paper
       symbol: 'BTC',
       condition: 'SPREAD_BPS_ABOVE',
       threshold: 8,
-      label: 'BTC CB-Bin Spread > 8 bps',
+      label: 'BTC Venue Spread > 8 bps',
       triggered: false,
       acknowledged: false,
     },
@@ -150,13 +166,12 @@ export function computePositions(state: PaperState, market: MarketState): {
   let unrealizedTotal = 0
 
   for (const pos of state.positions) {
-    if (pos.closedAt) continue
+    if (pos.closedAt || pos.qty <= 0) continue
     const mark = bestPrice(market.assets[pos.symbol]) ?? pos.entryPrice
     const dir = pos.side === 'LONG' ? 1 : -1
     const unrealizedPnl = (mark - pos.entryPrice) * pos.qty * dir
     const margin = (pos.entryPrice * pos.qty) / pos.leverage
     const roePct = margin > 0 ? (unrealizedPnl / margin) * 100 : 0
-    // Approximate isolated liq price (90% margin loss)
     const liqPrice =
       pos.side === 'LONG'
         ? pos.entryPrice * (1 - 0.9 / pos.leverage)
@@ -177,7 +192,11 @@ export function computePositions(state: PaperState, market: MarketState): {
   }
 }
 
-export function evaluateAlerts(state: PaperState, market: MarketState): PaperState {
+function appendAudit(state: PaperState, summary: string, now = Date.now()): AuditEntry[] {
+  return [{ ts: now, summary }, ...state.auditLog].slice(0, 12)
+}
+
+export function evaluateAlerts(state: PaperState, market: MarketState, now = Date.now()): PaperState {
   let banner = state.activeBanner
   const alerts = state.alerts.map(al => {
     if (al.acknowledged) return al
@@ -193,9 +212,13 @@ export function evaluateAlerts(state: PaperState, market: MarketState): PaperSta
     }
     if (hit && !al.triggered && !banner) {
       banner = {
+        id: `bn-${now}`,
+        kind: 'ACK_ALERT',
         title: `ALERT: ${al.label}`,
         detail: `${al.symbol} now $${price ? price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '--'}`,
-        actionLabel: 'Tap G2 to Acknowledge',
+        selectedOption: 'NO',
+        createdAt: now,
+        expiresAt: now + SAFETY_GATE_TTL_MS,
         alertId: al.id,
       }
     }
@@ -204,61 +227,243 @@ export function evaluateAlerts(state: PaperState, market: MarketState): PaperSta
   return { ...state, alerts, activeBanner: banner }
 }
 
-export function triggerDemoTakeProfitAlert(state: PaperState, market: MarketState): PaperState {
+export function draftReduceHalfBanner(
+  state: PaperState,
+  market: MarketState,
+  symbol?: SymbolKey,
+  now = Date.now(),
+): PaperState {
   const { open } = computePositions(state, market)
-  const target = open[0]
+  const target = (symbol ? open.find(o => o.pos.symbol === symbol) : open[0]) ?? open[0]
   if (!target) {
-    return {
-      ...state,
-      activeBanner: {
-        title: 'DEMO ALERT: BTC SPREAD +11.4 bps',
-        detail: 'Coinbase trading above Binance · Arb window open',
-        actionLabel: 'Tap G2 to Acknowledge',
-      },
-    }
+    return { ...state, lastActionToast: `No open ${symbol ?? ''} paper position to reduce`.trim() }
   }
-  const sign = target.unrealizedPnl >= 0 ? '+' : ''
+  const halfQty = Number((target.pos.qty / 2).toFixed(4))
+  const halfPnl = target.unrealizedPnl / 2
+  const sign = halfPnl >= 0 ? '+' : '-'
   return {
     ...state,
     activeBanner: {
-      title: `TP ALERT: ${target.pos.symbol} ${target.pos.side} ${target.pos.leverage}x`,
-      detail: `Mark $${target.mark.toLocaleString(undefined, { maximumFractionDigits: 2 })} | PnL ${sign}$${target.unrealizedPnl.toFixed(2)} (${sign}${target.roePct.toFixed(1)}%)`,
-      actionLabel: 'Tap G2: 1-Tap Paper Close',
+      id: `bn-${now}`,
+      kind: 'REDUCE_50',
+      title: `REDUCE 50%: ${target.pos.symbol} ${target.pos.side} ${target.pos.leverage}x`,
+      detail: `Trim ${halfQty} @ $${target.mark.toLocaleString(undefined, { maximumFractionDigits: 2 })} (${sign}$${Math.abs(halfPnl).toFixed(2)})`,
+      selectedOption: 'NO',
+      createdAt: now,
+      expiresAt: now + SAFETY_GATE_TTL_MS,
       positionId: target.pos.id,
     },
   }
 }
 
-export function confirmBannerOnG2(state: PaperState, market: MarketState): PaperState {
+export function draftClosePositionBanner(
+  state: PaperState,
+  market: MarketState,
+  symbol?: SymbolKey,
+  now = Date.now(),
+): PaperState {
+  const { open } = computePositions(state, market)
+  const target = (symbol ? open.find(o => o.pos.symbol === symbol) : open[0]) ?? open[0]
+  if (!target) {
+    return {
+      ...state,
+      activeBanner: {
+        id: `bn-${now}`,
+        kind: 'ACK_ALERT',
+        title: 'SPREAD SIGNAL: BTC +11.4 bps',
+        detail: 'Coinbase trading above Binance · Paper window',
+        selectedOption: 'NO',
+        createdAt: now,
+        expiresAt: now + SAFETY_GATE_TTL_MS,
+      },
+    }
+  }
+  const sign = target.unrealizedPnl >= 0 ? '+' : '-'
+  return {
+    ...state,
+    activeBanner: {
+      id: `bn-${now}`,
+      kind: 'CLOSE_100',
+      title: `CLOSE 100%: ${target.pos.symbol} ${target.pos.side} ${target.pos.leverage}x`,
+      detail: `Mark $${target.mark.toLocaleString(undefined, { maximumFractionDigits: 2 })} | PnL ${sign}$${Math.abs(target.unrealizedPnl).toFixed(2)} (${target.roePct >= 0 ? '+' : ''}${target.roePct.toFixed(1)}%)`,
+      selectedOption: 'NO',
+      createdAt: now,
+      expiresAt: now + SAFETY_GATE_TTL_MS,
+      positionId: target.pos.id,
+    },
+  }
+}
+
+export function draftOpenPaperBanner(
+  state: PaperState,
+  market: MarketState,
+  symbol: SymbolKey,
+  side: Side,
+  qty: number,
+  now = Date.now(),
+): PaperState {
+  const px = bestPrice(market.assets[symbol])
+  return {
+    ...state,
+    activeBanner: {
+      id: `bn-${now}`,
+      kind: 'OPEN_PAPER',
+      title: `OPEN PAPER: ${side} ${qty} ${symbol} 3x`,
+      detail: `Est. Entry ${px ? '$' + px.toLocaleString(undefined, { maximumFractionDigits: 2 }) : 'LIVE'} · Hyperliquid (Paper)`,
+      selectedOption: 'NO',
+      createdAt: now,
+      expiresAt: now + SAFETY_GATE_TTL_MS,
+      draftOrder: { symbol, side, qty, leverage: 3 },
+    },
+  }
+}
+
+export function draftAddAlertBanner(
+  state: PaperState,
+  draft: Omit<PriceAlert, 'id' | 'triggered' | 'acknowledged'>,
+  now = Date.now(),
+): PaperState {
+  return {
+    ...state,
+    activeBanner: {
+      id: `bn-${now}`,
+      kind: 'ADD_ALERT',
+      title: `ARM ALERT: ${draft.label}`,
+      detail: `Triggers G2 heads-up overlay automatically`,
+      selectedOption: 'NO',
+      createdAt: now,
+      expiresAt: now + SAFETY_GATE_TTL_MS,
+      draftAlert: draft,
+    },
+  }
+}
+
+export function triggerDemoTakeProfitAlert(state: PaperState, market: MarketState): PaperState {
+  return draftClosePositionBanner(state, market)
+}
+
+export function toggleBannerOption(state: PaperState): PaperState {
   if (!state.activeBanner) return state
-  const { positionId, alertId } = state.activeBanner
+  return {
+    ...state,
+    activeBanner: {
+      ...state.activeBanner,
+      selectedOption: state.activeBanner.selectedOption === 'NO' ? 'YES' : 'NO',
+    },
+  }
+}
 
-  let next = { ...state, activeBanner: null as PaperState['activeBanner'] }
+export function expireBannerIfNeeded(state: PaperState, now = Date.now()): PaperState {
+  if (!state.activeBanner || now < state.activeBanner.expiresAt) return state
+  return {
+    ...state,
+    activeBanner: null,
+    lastActionToast: 'Safety gate expired (Default-NO)',
+    auditLog: appendAudit(state, `Expired (Default-NO): ${state.activeBanner.title}`, now),
+  }
+}
 
-  if (alertId) {
-    next = {
-      ...next,
-      alerts: next.alerts.map(a => (a.id === alertId ? { ...a, acknowledged: true } : a)),
-      lastActionToast: 'Alert acknowledged on G2',
+export function confirmBannerOnG2(state: PaperState, market: MarketState, now = Date.now()): PaperState {
+  const banner = state.activeBanner
+  if (!banner) return state
+
+  if (now >= banner.expiresAt) {
+    return expireBannerIfNeeded(state, now)
+  }
+
+  // Default-NO gate: tapping while NO is highlighted safely cancels without executing!
+  if (banner.selectedOption === 'NO') {
+    return {
+      ...state,
+      activeBanner: null,
+      lastActionToast: 'Cancelled safely (Default-NO)',
+      auditLog: appendAudit(state, `Cancelled (NO): ${banner.title}`, now),
     }
   }
 
-  if (positionId) {
-    const { open } = computePositions(next, market)
-    const hit = open.find(o => o.pos.id === positionId)
-    if (hit) {
-      const realized = hit.unrealizedPnl
+  let next: PaperState = { ...state, activeBanner: null }
+
+  if (banner.kind === 'ACK_ALERT') {
+    if (banner.alertId) {
       next = {
+        ...next,
+        alerts: next.alerts.map(a => (a.id === banner.alertId ? { ...a, acknowledged: true } : a)),
+        lastActionToast: 'Alert acknowledged on G2',
+        auditLog: appendAudit(next, `Ack alert: ${banner.title}`, now),
+      }
+    } else {
+      next = {
+        ...next,
+        lastActionToast: 'Alert acknowledged on G2',
+        auditLog: appendAudit(next, `Ack banner: ${banner.title}`, now),
+      }
+    }
+    return next
+  }
+
+  if (banner.kind === 'ADD_ALERT' && banner.draftAlert) {
+    const created: PriceAlert = {
+      id: `al-${now}`,
+      ...banner.draftAlert,
+      triggered: false,
+      acknowledged: false,
+    }
+    return {
+      ...next,
+      alerts: [created, ...next.alerts].slice(0, 6),
+      lastActionToast: `Armed: ${created.label}`,
+      auditLog: appendAudit(next, `Armed alert: ${created.label}`, now),
+    }
+  }
+
+  if (banner.kind === 'OPEN_PAPER' && banner.draftOrder) {
+    const { symbol, side, qty, leverage } = banner.draftOrder
+    const entry = bestPrice(market.assets[symbol]) ?? 100
+    const created: PaperPosition = {
+      id: `pos-${now}`,
+      symbol,
+      side,
+      qty,
+      entryPrice: entry,
+      leverage,
+      venue: 'Hyperliquid',
+    }
+    return {
+      ...next,
+      positions: [created, ...next.positions],
+      lastActionToast: `Opened ${side} ${qty} ${symbol} (Paper)`,
+      auditLog: appendAudit(next, `Opened ${side} ${qty} ${symbol} @ $${entry.toFixed(2)}`, now),
+    }
+  }
+
+  if ((banner.kind === 'CLOSE_100' || banner.kind === 'REDUCE_50') && banner.positionId) {
+    const { open } = computePositions(next, market)
+    const hit = open.find(o => o.pos.id === banner.positionId)
+    if (hit) {
+      if (banner.kind === 'REDUCE_50') {
+        const realized = hit.unrealizedPnl / 2
+        const remQty = Number((hit.pos.qty / 2).toFixed(4))
+        const msg = `Reduced 50% ${hit.pos.symbol} (${realized >= 0 ? '+' : '-'}$${Math.abs(realized).toFixed(2)})`
+        return {
+          ...next,
+          realizedSessionPnl: next.realizedSessionPnl + realized,
+          positions: next.positions.map(p => (p.id === hit.pos.id ? { ...p, qty: remQty } : p)),
+          lastActionToast: msg,
+          auditLog: appendAudit(next, msg, now),
+        }
+      }
+      const realized = hit.unrealizedPnl
+      const msg = `Closed ${hit.pos.symbol} ${hit.pos.side} (${realized >= 0 ? '+' : '-'}$${Math.abs(realized).toFixed(2)})`
+      return {
         ...next,
         realizedSessionPnl: next.realizedSessionPnl + realized,
         positions: next.positions.map(p =>
-          p.id === positionId ? { ...p, closedAt: Date.now(), realizedPnl: realized } : p,
+          p.id === hit.pos.id ? { ...p, closedAt: now, realizedPnl: realized } : p,
         ),
-        lastActionToast: `Closed ${hit.pos.symbol} ${hit.pos.side} (${realized >= 0 ? '+' : ''}$${realized.toFixed(2)})`,
+        lastActionToast: msg,
+        auditLog: appendAudit(next, msg, now),
       }
     }
-  } else if (!alertId) {
-    next = { ...next, lastActionToast: 'Alert acknowledged on G2' }
   }
 
   return next
